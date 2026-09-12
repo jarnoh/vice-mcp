@@ -691,6 +691,14 @@ static int zmbvdrv_record(screenshot_t *screenshot)
         zmbvdrv_init_file();
     }
 
+    if (!file_init_done) {
+        /* Audio hasn't opened yet (e.g. a video frame arrived before the
+           emulation ran far enough for the sound engine to start), so
+           cur_screen/video_work_buffer aren't allocated yet. Drop this
+           frame rather than encoding into unallocated buffers. */
+        return 0;
+    }
+
     zmbvdrv_fill_rgb_image(screenshot);
 
     flags = ((frameno % KEYFRAME_INTERVAL == 0) ? ZMBV_PREP_FLAG_KEYFRAME : ZMBV_PREP_FLAG_NONE);
