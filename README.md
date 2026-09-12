@@ -24,6 +24,7 @@ Your agent can:
 - **Debug 6502 code** — breakpoints, watchpoints, conditional breaks, single-stepping
 - **Inspect everything** — CPU registers, memory banks, VIC-II graphics, SID audio, CIA timers
 - **See what's on screen** — take screenshots, read sprite bitmaps as ASCII art
+- **Record what happens** — capture video+audio to an AVI file, correctly paced even in warp mode
 - **Interact like a human** — type text, press keys, move joysticks
 - **Measure performance** — cycle-accurate stopwatch, execution tracing, interrupt logging
 - **Save and restore state** — full snapshot management with metadata
@@ -64,6 +65,7 @@ and consistent parameter naming.
 | **Disk** | `vice.disk.attach` `vice.disk.detach` `vice.disk.list` `vice.disk.read_sector` | Mount D64/D71/D81 images, browse directories, read raw sectors |
 | **Machine** | `vice.machine.reset` `vice.machine.config.get` `vice.machine.config.set` `vice.autostart` | Hard/soft reset, resource control (warp, speed, model), program loading |
 | **Display** | `vice.display.screenshot` `vice.display.get_dimensions` | Screen capture to file or base64, display geometry |
+| **Media** | `vice.media.record_start` `vice.media.record_stop` `vice.media.record_status` | Record video+audio of a session to an AVI file, warp-mode safe |
 | **Input** | `vice.keyboard.type` `vice.keyboard.key_press` `vice.keyboard.key_release` `vice.keyboard.restore` `vice.keyboard.matrix` `vice.joystick.set` | Keyboard and joystick — text typing, individual keys, direct matrix, RESTORE/NMI |
 | **Debug** | `vice.disassemble` `vice.symbols.load` `vice.symbols.lookup` `vice.watch.add` `vice.backtrace` `vice.cycles.stopwatch` | Disassembly, symbol files, call stack, cycle-accurate timing |
 | **Snapshots** | `vice.snapshot.save` `vice.snapshot.load` `vice.snapshot.list` | Full emulator state save/restore with JSON metadata |
@@ -736,6 +738,33 @@ Capture the screen.
 
 #### `vice.display.get_dimensions`
 Get display dimensions. No parameters.
+
+---
+
+### Media (Video/Audio Recording)
+
+#### `vice.media.record_start`
+Start recording video+audio of the running session to a file.
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `path` | string | yes | Output file path (e.g. `capture.avi`) |
+| `driver` | string | | Recording driver (default: `FFMPEG`) |
+
+Recording is paced off the emulated frame/sample counters, not wall-clock time,
+so it stays complete and correctly synced whether or not warp mode is enabled —
+toggle warp separately with `vice.machine.config.set`. For best results also
+leave `SoundEmulateOnWarp` enabled (the default) so audio keeps being generated
+while warped.
+
+#### `vice.media.record_stop`
+Stop the active recording. No parameters.
+
+#### `vice.media.record_status`
+Report whether a recording is active. No parameters.
+| Response field | Type | Description |
+|---|---|---|
+| `recording` | boolean | Whether a recording is currently in progress |
+| `warp_mode` | boolean | Whether warp mode is currently enabled |
 
 ---
 
