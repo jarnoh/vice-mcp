@@ -128,12 +128,28 @@ static int audio_channels = 1;       /* initialized by zmbv_soundmovie_init */
 
 static double video_framerate = 50.125f; /* initialized by zmbvdrv_init_video */
 
-CLOCK clk_startframe;
-CLOCK clk_frame_cycles;
-CLOCK clk_last_audio_frame;
-CLOCK clk_this_audio_frame;
-CLOCK clk_last_video_frame;
-CLOCK clk_this_video_frame;
+/* Audio is decoupled from whatever cadence the sound engine happens to
+   deliver samples at, and instead paced to the video frame clock: a FIFO
+   queues incoming samples, and zmbvdrv_record() drains exactly the number
+   of samples that the nominal (audio_freq / video_framerate) ratio says
+   that video frame is worth, using a fractional accumulator so the
+   non-integer ratio distributes without accumulating rounding error over
+   the length of the recording. This keeps the audio and video track
+   durations identical by construction, without ever dropping or
+   duplicating a video frame - jitter between the two is absorbed by the
+   FIFO instead. */
+#define AUDIO_FIFO_SECONDS  5
+
+static int16_t *audio_fifo = NULL;
+static size_t audio_fifo_capacity = 0;   /* in stereo frames */
+static size_t audio_fifo_head = 0;
+static size_t audio_fifo_tail = 0;
+static size_t audio_fifo_count = 0;
+static double audio_target_accum = 0.0;  /* ideal cumulative sample count */
+static uint64_t audio_frames_emitted = 0;
+static int audio_fifo_overflow_logged = 0;
+static int audio_fifo_underrun_logged = 0;
+static int16_t frame_audio_buf[MAX_AUDIO_BUFFER_SIZE];
 
 static int zmbvdrv_init_file(void);
 
@@ -260,6 +276,103 @@ static int zmbvdrv_cmdline_options_init(void)
 /*---------------------------------------------------------------------*/
 
 /*-----------------------*/
+/* audio pacing fifo     */
+/*-----------------------*/
+
+static void audio_fifo_reset(void)
+{
+    audio_fifo_head = 0;
+    audio_fifo_tail = 0;
+    audio_fifo_count = 0;
+    audio_target_accum = 0.0;
+    audio_frames_emitted = 0;
+    audio_fifo_overflow_logged = 0;
+    audio_fifo_underrun_logged = 0;
+}
+
+static int audio_fifo_alloc(int freq)
+{
+    audio_fifo_capacity = (size_t)freq * AUDIO_FIFO_SECONDS;
+    audio_fifo = lib_malloc(audio_fifo_capacity * 2 * sizeof(int16_t));
+    audio_fifo_reset();
+    return (audio_fifo != NULL) ? 0 : -1;
+}
+
+static void audio_fifo_free(void)
+{
+    if (audio_fifo != NULL) {
+        lib_free(audio_fifo);
+        audio_fifo = NULL;
+    }
+    audio_fifo_capacity = 0;
+}
+
+/* Queue `frames` stereo (interleaved L/R) samples. If the producer is
+   persistently faster than the nominal audio rate for long enough to fill
+   the whole fifo, the oldest queued samples are dropped to keep memory use
+   bounded - this should not happen in normal operation. */
+static void audio_fifo_push(const int16_t *data, size_t frames)
+{
+    size_t i;
+
+    if (audio_fifo == NULL || audio_fifo_capacity == 0) {
+        return;
+    }
+
+    if (frames > audio_fifo_capacity) {
+        data += (frames - audio_fifo_capacity) * 2;
+        frames = audio_fifo_capacity;
+    }
+
+    if (audio_fifo_count + frames > audio_fifo_capacity) {
+        size_t drop = (audio_fifo_count + frames) - audio_fifo_capacity;
+        if (!audio_fifo_overflow_logged) {
+            log_warning(LOG_DEFAULT,
+                "zmbvdrv: audio fifo persistently overfull, dropping queued "
+                "samples to keep memory use bounded (recording audio source "
+                "is running faster than the nominal rate)");
+            audio_fifo_overflow_logged = 1;
+        }
+        audio_fifo_head = (audio_fifo_head + drop) % audio_fifo_capacity;
+        audio_fifo_count -= drop;
+    }
+
+    for (i = 0; i < frames; i++) {
+        size_t pos = (audio_fifo_tail + i) % audio_fifo_capacity;
+        audio_fifo[pos * 2] = data[i * 2];
+        audio_fifo[pos * 2 + 1] = data[i * 2 + 1];
+    }
+    audio_fifo_tail = (audio_fifo_tail + frames) % audio_fifo_capacity;
+    audio_fifo_count += frames;
+}
+
+/* Dequeue exactly `frames` stereo samples, padding with silence if fewer
+   are available (a transient underrun, e.g. right at recording start). */
+static void audio_fifo_pop(int16_t *out, size_t frames)
+{
+    size_t avail = (frames < audio_fifo_count) ? frames : audio_fifo_count;
+    size_t i;
+
+    if (avail < frames && !audio_fifo_underrun_logged) {
+        LOG(("zmbvdrv: audio fifo underrun, padding %u sample(s) of silence",
+             (unsigned)(frames - avail)));
+    }
+
+    for (i = 0; i < avail; i++) {
+        size_t pos = (audio_fifo_head + i) % audio_fifo_capacity;
+        out[i * 2] = audio_fifo[pos * 2];
+        out[i * 2 + 1] = audio_fifo[pos * 2 + 1];
+    }
+    if (avail < frames) {
+        memset(&out[avail * 2], 0, (frames - avail) * 2 * sizeof(int16_t));
+    }
+    if (audio_fifo_capacity > 0) {
+        audio_fifo_head = (audio_fifo_head + avail) % audio_fifo_capacity;
+    }
+    audio_fifo_count -= avail;
+}
+
+/*-----------------------*/
 /* audio stream encoding */
 /*-----------------------*/
 
@@ -275,12 +388,12 @@ static int zmbvdrv_open_audio(int speed, int channels)
     }
     zmbvdrv_audio_in.size = round((double)audio_freq / video_framerate);
     LOG(("zmbvdrv_open_audio freq:%d fps:%f bufsize:%d", audio_freq, video_framerate, zmbvdrv_audio_in.size));
-#if 0
-    memset(cur_audio, 0, zmbvdrv_audio_in.size * 2);
-    if (zmbv_avi_write_chunk_audio(zavi, &cur_audio[0], zmbvdrv_audio_in.size) < 0) {
-        LOG(("FATAL: can't write audio frame for screen #%d", 0));
+
+    if (audio_fifo_alloc(audio_freq) < 0) {
+        log_error(LOG_DEFAULT, "zmbvdrv: Error allocating audio fifo");
+        return -1;
     }
-#endif
+
     return 0;
 }
 
@@ -294,6 +407,8 @@ static void zmbvdrv_close_audio(void)
     }
     zmbvdrv_audio_in.buffer = NULL;
     zmbvdrv_audio_in.size = 0;
+
+    audio_fifo_free();
 }
 
 /* Soundmovie API soundmovie_funcs_t.init */
@@ -327,40 +442,20 @@ static int zmbv_soundmovie_encode(soundmovie_buffer_t *audio_in)
 {
     int ret = 0;
 
-    clk_last_audio_frame = clk_this_audio_frame;
-    clk_this_audio_frame = maincpu_clk;
-
-    LOGFRAMES(("zmbv_soundmovie_encode(size:%d used:%d channels:%d) clk:%ld frame:%d",
-               audio_in->size, audio_in->used, audio_channels, clk_this_audio_frame, frameno));
+    LOGFRAMES(("zmbv_soundmovie_encode(size:%d used:%d channels:%d) frame:%d",
+               audio_in->size, audio_in->used, audio_channels, frameno));
 
     /* FIXME: we might have an endianess problem here, we might have to swap lo/hi on BE machines */
     if (audio_channels == 1) {
         int i, o;
-#if 1
         /* convert mono -> stereo */
         for (i = o = 0; i < audio_in->used; i++, o+=2) {
             cur_audio[o] = audio_in->buffer[i];
             cur_audio[o+1] = audio_in->buffer[i];
         }
-        /* write avi chunks */
-        if (zmbv_avi_write_chunk_audio(zavi, &cur_audio[0], audio_in->used * 4) < 0) {
-            LOG(("FATAL: can't write audio frame for screen #%d", frameno));
-            ret = -1;
-        }
-#else
-        /* FIXME: we should write the mono stream into the avi instead */
-#endif
+        audio_fifo_push(cur_audio, (size_t)audio_in->used);
     } else if (audio_channels == 2) {
-        int i, o;
-        for (i = o = 0; i < audio_in->used; i+=2, o+=2) {
-            cur_audio[o] = audio_in->buffer[i];
-            cur_audio[o+1] = audio_in->buffer[i+1];
-        }
-        /* write avi chunks */
-        if (zmbv_avi_write_chunk_audio(zavi, &audio_in->buffer[0], audio_in->used * 2) < 0) {
-            LOG(("FATAL: can't write audio frame for screen #%d", frameno));
-            ret = -1;
-        }
+        audio_fifo_push(audio_in->buffer, (size_t)audio_in->used / 2);
     } else {
         ret = -1;
     }
@@ -463,7 +558,6 @@ static void zmbvdrv_init_video(screenshot_t *screenshot)
     video_init_done = 1;
     {
         double time_base, fps;
-        clk_frame_cycles = machine_get_cycles_per_frame();
         time_base = ((double)machine_get_cycles_per_frame()) / ((double) machine_get_cycles_per_second());
         fps = 1.0f / time_base;
         LOG(("zmbvdrv_init_video fps: %f timebase: %f", fps, time_base));
@@ -515,10 +609,6 @@ static int zmbvdrv_save(screenshot_t *screenshot, const char *filename)
 
     /* complevel = 9; */
     /* no_zlib = 0; */
-
-    clk_startframe = maincpu_clk;
-    clk_this_video_frame = clk_this_audio_frame = clk_startframe;
-    LOG(("zmbvdrv_save start clock: %ld", clk_startframe));
 
     if (no_zlib) {
         iflg |= ZMBV_INIT_FLAG_NOZLIB;
@@ -593,28 +683,12 @@ static int zmbvdrv_record(screenshot_t *screenshot)
     int ret = -1;
     int32_t written;
     int flags;
-    CLOCK clk_diff;
+    double nominal_rate;
+    size_t new_total;
+    size_t want_frames;
 
     if (audio_init_done && video_init_done && !file_init_done) {
         zmbvdrv_init_file();
-    }
-
-    clk_last_video_frame = clk_this_video_frame;
-    clk_this_video_frame = maincpu_clk;
-
-    if (clk_this_video_frame > clk_this_audio_frame) {
-        /* video ahead of audio */
-        clk_diff = clk_this_video_frame - clk_this_audio_frame;
-        if (clk_diff > clk_frame_cycles) {
-            LOG(("zmbvdrv_record video>audio %ld %ld frame:%ld diff:%ld", clk_this_video_frame, clk_this_audio_frame, clk_frame_cycles, clk_diff));
-            /*return 0;*/ /* skip this frame? */
-        }
-    } else if (clk_this_audio_frame > clk_this_video_frame) {
-        /* audio is ahead of video */
-        clk_diff = clk_this_audio_frame - clk_this_video_frame;
-        if (clk_diff > clk_frame_cycles) {
-            LOG(("zmbvdrv_record video<audio %ld %ld frame:%ld diff:%ld", clk_this_video_frame, clk_this_audio_frame, clk_frame_cycles, clk_diff));
-        }
     }
 
     zmbvdrv_fill_rgb_image(screenshot);
@@ -623,7 +697,7 @@ static int zmbvdrv_record(screenshot_t *screenshot)
 
     frameno++;
 
-    LOGFRAMES(("zmbvdrv_record: frame %d (clk:%ld)", frameno, clk_this_video_frame));
+    LOGFRAMES(("zmbvdrv_record: frame %d", frameno));
 
     /* encode video frame */
     if (zmbv_encode_prepare_frame(zcodec, flags, fmt, cur_pal, video_work_buffer, work_buffer_size) < 0) {
@@ -646,6 +720,30 @@ static int zmbvdrv_record(screenshot_t *screenshot)
         LOG(("FATAL: can't write compressed frame for screen #%d", frameno));
         goto quit;
     }
+
+    /* Emit this frame's share of audio: exactly enough samples that the
+       running total matches frameno * (audio_freq / video_framerate),
+       rounded via a fractional accumulator so the non-integer ratio
+       distributes without long-term drift. Samples come out of the fifo
+       fed by zmbv_soundmovie_encode(); any gap between how fast that
+       arrives and this nominal schedule is absorbed there, not here. */
+    nominal_rate = (double)audio_freq / video_framerate;
+    audio_target_accum += nominal_rate;
+    new_total = (size_t)audio_target_accum;
+    if (new_total > audio_frames_emitted) {
+        want_frames = new_total - audio_frames_emitted;
+        if (want_frames > MAX_AUDIO_BUFFER_SIZE / 2) {
+            /* should not happen at any sane fps/samplerate combination */
+            want_frames = MAX_AUDIO_BUFFER_SIZE / 2;
+        }
+        audio_fifo_pop(frame_audio_buf, want_frames);
+        if (zmbv_avi_write_chunk_audio(zavi, frame_audio_buf, (int)(want_frames * 4)) < 0) {
+            LOG(("FATAL: can't write audio frame for screen #%d", frameno));
+            goto quit;
+        }
+        audio_frames_emitted += want_frames;
+    }
+
     ret = 0;
 quit:
     if (ret < 0) {

@@ -330,8 +330,10 @@ int zmbv_avi_write_chunk_audio (zmbv_avi_t zavi, const void *data, int size) {
     if (size == 0) return 0;
     //int res = zmbv_avi_write_chunk(zavi, "01wb", zavi->audioused*4, zavi->audiobuf, 0);
     int res = zmbv_avi_write_chunk(zavi, "01wb", size, data, 0);
-    //zavi->audiowritten = zavi->audioused*4;
-    zavi->audiowritten = size;
+    /* accumulate the total audio bytes written across the whole recording -
+       this feeds the AVI header's audio stream Length field at close time,
+       so it must be a running total, not just the size of this one chunk */
+    zavi->audiowritten += size;
     //zavi->audioused = 0;
     return res;
   }
