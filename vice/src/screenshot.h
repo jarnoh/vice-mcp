@@ -149,6 +149,7 @@ char *screenshot_create_quickscreenshot_filename(const char *format);
 int screenshot_resources_init(void);
 int screenshot_cmdline_options_init(void);
 void screenshot_ui_auto_screenshot(void);
+void screenshot_check_pending_record(void);
 
 #ifdef FEATURE_CPUMEMHISTORY
 int memmap_screenshot_save(const char *drvname, const char *filename, int x_size, int y_size, uint8_t *gfx, uint8_t *palette);

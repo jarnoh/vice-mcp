@@ -43,6 +43,7 @@
 #include "lib.h"
 #include "log.h"
 #include "machine.h"
+#include "machine-video.h"
 #include "palette.h"
 #include "resources.h"
 #include "screenshot.h"
@@ -183,15 +184,20 @@ static int screenshot_save_core(screenshot_t *screenshot, gfxoutputdrv_t *drv,
             }
         }
     } else {
-        /* We're recording a movie */
-        if (vsync_get_warp_mode() == 0) {
-            /* skip recording when warpmode is active, this doesn't really work -
-               and unless we significantly change what warpmode does can not work */
-            if ((recording_driver->record)(screenshot) < 0) {
-                log_error(screenshot_log, "Recording failed...");
-                lib_free(screenshot->color_map);
-                return -1;
-            }
+        /* We're recording a movie. This runs every emulated frame regardless
+           of warp mode: the raster draw buffer is always fully rendered
+           (only the on-screen refresh is throttled under warp), and sound.c
+           keeps emulating/feeding audio to a recording device even when
+           warp mode disables the live playback device and its sync
+           throttling. The gfxoutput driver's own frame/audio-time bookkeeping
+           (e.g. ffmpegexedrv_record()) keeps video and audio in sync using
+           emulated frame/sample counts rather than wall-clock time, so this
+           produces a complete, correctly-paced recording even at warp
+           speed. */
+        if ((recording_driver->record)(screenshot) < 0) {
+            log_error(screenshot_log, "Recording failed...");
+            lib_free(screenshot->color_map);
+            return -1;
         }
     }
 
@@ -413,9 +419,30 @@ static int set_autosave_screenshot_format(const char *val, void *param)
 }
 
 
+/* Video (+audio) recording to start automatically once the machine has
+   booted, set via the -videorecord/-videorecorddriver command line options. */
+static char *videorecord_file = NULL;
+static char *videorecord_driver = NULL;
+
+static int set_videorecord_file(const char *val, void *param)
+{
+    util_string_set(&videorecord_file, val);
+    return 0;
+}
+
+static int set_videorecord_driver(const char *val, void *param)
+{
+    util_string_set(&videorecord_driver, (val == NULL || val[0] == '\0') ? "FFMPEG" : val);
+    return 0;
+}
+
 static resource_string_t resources_string[] = {
     { "QuicksaveScreenshotFormat", SCREENSHOT_DEFAULT_QUICKSCREENSHOT_FORMAT, RES_EVENT_NO, NULL,
       &autosave_screenshot_format, set_autosave_screenshot_format, NULL },
+    { "VideoRecordFile", "", RES_EVENT_NO, NULL,
+      &videorecord_file, set_videorecord_file, NULL },
+    { "VideoRecordDriver", "FFMPEG", RES_EVENT_NO, NULL,
+      &videorecord_driver, set_videorecord_driver, NULL },
     RESOURCE_STRING_LIST_END
 };
 
@@ -451,6 +478,15 @@ static cmdline_option_t cmdline_options[] =
 #endif
     "bmp, iff, pcx, ppm, 4bt, artstudio, koala, minipaint)"
     },
+    { "-videorecord", SET_RESOURCE, CMDLINE_ATTRIB_NEED_ARGS,
+      NULL, NULL, "VideoRecordFile", NULL,
+      "<Name>", "Start recording video and audio to <Name> as soon as the machine boots. "
+      "Works correctly together with -warp: video and audio stay complete and in sync "
+      "(driven by emulated frame/sample counts, not wall-clock time), it just gets "
+      "written out faster than real time." },
+    { "-videorecorddriver", SET_RESOURCE, CMDLINE_ATTRIB_NEED_ARGS,
+      NULL, NULL, "VideoRecordDriver", NULL,
+      "<Driver>", "Specify the driver used by -videorecord (FFMPEG or ZMBV, default: FFMPEG)" },
     CMDLINE_LIST_END
 };
 
@@ -462,6 +498,39 @@ int screenshot_resources_init(void)
 int screenshot_cmdline_options_init(void)
 {
     return cmdline_register_options(cmdline_options);
+}
+
+/** \brief  Start any video recording requested via -videorecord, once the
+ *          video canvas is available.
+ *
+ * Called once from the startup sequence after the machine (and its video
+ * canvas) has been initialized.
+ */
+void screenshot_check_pending_record(void)
+{
+    struct video_canvas_s *canvas;
+    const char *driver;
+
+    if (videorecord_file == NULL || videorecord_file[0] == '\0') {
+        return;
+    }
+
+    driver = (videorecord_driver == NULL || videorecord_driver[0] == '\0')
+             ? "FFMPEG" : videorecord_driver;
+
+    canvas = machine_video_canvas_get(0);
+    if (canvas == NULL) {
+        log_error(screenshot_log, "-videorecord: no video canvas available, cannot start recording.");
+        return;
+    }
+
+    if (screenshot_save(driver, videorecord_file, canvas) < 0) {
+        log_error(screenshot_log, "-videorecord: failed to start recording '%s' with driver '%s'.",
+                  videorecord_file, driver);
+    } else {
+        log_message(screenshot_log, "-videorecord: recording to '%s' with driver '%s'.",
+                    videorecord_file, driver);
+    }
 }
 
 

@@ -149,6 +149,11 @@ extern cJSON* mcp_tool_autostart(cJSON *params);
 extern cJSON* mcp_tool_display_screenshot(cJSON *params);
 extern cJSON* mcp_tool_display_get_dimensions(cJSON *params);
 
+/* Tool handlers - Media (video/audio recording) */
+extern cJSON* mcp_tool_media_record_start(cJSON *params);
+extern cJSON* mcp_tool_media_record_stop(cJSON *params);
+extern cJSON* mcp_tool_media_record_status(cJSON *params);
+
 /* Tool handlers - Phase 3.1: Input Control */
 extern cJSON* mcp_tool_keyboard_type(cJSON *params);
 extern cJSON* mcp_tool_keyboard_petscii(cJSON *params);

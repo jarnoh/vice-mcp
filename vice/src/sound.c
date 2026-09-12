@@ -1386,8 +1386,11 @@ static int sound_run_sound(void)
         }
     }
 
-    /* if "disable sound emulation on warp" is enabled, exit */
-    if ((sound_emulation_enabled_on_warp == 0) && warp_mode_enabled) {
+    /* if "disable sound emulation on warp" is enabled, exit - unless a
+       recording device (e.g. video capture) is attached, in which case
+       the chips still need to be emulated so the recording has audio. */
+    if ((sound_emulation_enabled_on_warp == 0) && warp_mode_enabled
+            && (snddata.recdev == NULL)) {
         snddata.lastclk = maincpu_clk;
         return 0;
     }
@@ -1570,49 +1573,65 @@ bool sound_flush(void)
      * The 'push against the audio device' sync method depends on this.
      */
 
-    while (!warp_mode_enabled) {
-
-        if (snddata.playdev->bufferspace) {
-            space = snddata.playdev->bufferspace();
-        } else {
-            /* We are using a blocking driver like simple pulse - write everything we have. */
-            space = nr;
-        }
-
-        space -= space % snddata.fragsize;
-
-        if (space) {
-            if (nr > space) {
-                /* Write as much as we can */
-                nr = space;
-            }
-
-            mainlock_yield_begin();
-
-            /* Flush buffer, all channels are already mixed into it. */
-            if (snddata.playdev->write(snddata.buffer, nr * snddata.sound_output_channels)) {
+    if (warp_mode_enabled) {
+        /*
+         * There is no live playback device to pace against (or it's not
+         * worth pacing against, since we're warping), but a recording
+         * device is attached - push every sample straight to it so
+         * warp-mode recordings get complete, correctly-paced audio
+         * instead of having it silently dropped here.
+         */
+        if (snddata.recdev) {
+            if (snddata.recdev->write(snddata.buffer, nr * snddata.sound_output_channels)) {
                 sound_error("write to sound device failed.");
-
-                mainlock_yield_end();
                 goto done;
             }
+        }
+    } else {
+        while (!warp_mode_enabled) {
 
-            if (snddata.recdev) {
-                if (snddata.recdev->write(snddata.buffer, nr * snddata.sound_output_channels)) {
+            if (snddata.playdev->bufferspace) {
+                space = snddata.playdev->bufferspace();
+            } else {
+                /* We are using a blocking driver like simple pulse - write everything we have. */
+                space = nr;
+            }
+
+            space -= space % snddata.fragsize;
+
+            if (space) {
+                if (nr > space) {
+                    /* Write as much as we can */
+                    nr = space;
+                }
+
+                mainlock_yield_begin();
+
+                /* Flush buffer, all channels are already mixed into it. */
+                if (snddata.playdev->write(snddata.buffer, nr * snddata.sound_output_channels)) {
                     sound_error("write to sound device failed.");
 
                     mainlock_yield_end();
                     goto done;
                 }
+
+                if (snddata.recdev) {
+                    if (snddata.recdev->write(snddata.buffer, nr * snddata.sound_output_channels)) {
+                        sound_error("write to sound device failed.");
+
+                        mainlock_yield_end();
+                        goto done;
+                    }
+                }
+
+                /* Successful write to audio device, exit loop. */
+                mainlock_yield_end();
+                break;
             }
 
-            /* Successful write to audio device, exit loop. */
-            mainlock_yield_end();
-            break;
+            /* We can't write yet, try again after a minimal sleep. */
+            mainlock_yield_and_sleep(tick_per_second() / 1000);
         }
-
-        /* We can't write yet, try again after a minimal sleep. */
-        mainlock_yield_and_sleep(tick_per_second() / 1000);
     }
 
     snddata.bufptr -= nr;

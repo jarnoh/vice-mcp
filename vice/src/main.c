@@ -460,6 +460,10 @@ int main_program(int argc, char **argv)
         return -1;
     }
 
+    /* Start any recording requested via -videorecord now that the video
+       canvas exists. */
+    screenshot_check_pending_record();
+
 #ifdef USE_VICE_THREAD
 
     {

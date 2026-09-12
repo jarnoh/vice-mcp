@@ -100,6 +100,11 @@ const mcp_tool_t tool_registry[] = {
     { "vice.display.screenshot", "Capture screenshot (to file or base64)", mcp_tool_display_screenshot },
     { "vice.display.get_dimensions", "Get display dimensions", mcp_tool_display_get_dimensions },
 
+    /* Media: video/audio recording */
+    { "vice.media.record_start", "Start recording video+audio to a file (works correctly in warp mode)", mcp_tool_media_record_start },
+    { "vice.media.record_stop", "Stop the active video/audio recording", mcp_tool_media_record_stop },
+    { "vice.media.record_status", "Report whether a video/audio recording is active", mcp_tool_media_record_status },
+
     /* Phase 3.1: Input Control */
     { "vice.keyboard.type", "Type text (uppercase ASCII displays as uppercase on C64 by default)", mcp_tool_keyboard_type },
     { "vice.keyboard.petscii", "Feed exact PETSCII bytes into the KERNAL keyboard buffer", mcp_tool_keyboard_petscii },

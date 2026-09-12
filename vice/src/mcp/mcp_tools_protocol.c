@@ -469,6 +469,20 @@ cJSON* mcp_tool_tools_list(cJSON *params)
             /* No required params since path is optional when return_base64 is true */
             schema = mcp_schema_object(props, NULL);
 
+        } else if (strcmp(name, "vice.media.record_start") == 0) {
+            props = cJSON_CreateObject();
+            cJSON_AddItemToObject(props, "path", mcp_prop_string("Output file path for the recording"));
+            cJSON_AddItemToObject(props, "driver", mcp_prop_string("Recording driver: FFMPEG or ZMBV (default: FFMPEG)"));
+            required = cJSON_CreateArray();
+            cJSON_AddItemToArray(required, cJSON_CreateString("path"));
+            schema = mcp_schema_object(props, required);
+
+        } else if (strcmp(name, "vice.media.record_stop") == 0) {
+            schema = mcp_schema_empty();
+
+        } else if (strcmp(name, "vice.media.record_status") == 0) {
+            schema = mcp_schema_empty();
+
         } else if (strcmp(name, "vice.execution.step") == 0) {
             props = cJSON_CreateObject();
             cJSON_AddItemToObject(props, "count", mcp_prop_number("Number of instructions to step"));

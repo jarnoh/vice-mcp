@@ -20,6 +20,7 @@ libmcp_a_SOURCES = \
     mcp_tools_internal.h \
     mcp_tools_helpers.c \
     mcp_tools_display.c \
+    mcp_tools_media.c \
     mcp_tools_disk.c \
     mcp_tools_snapshot.c \
     mcp_tools_input.c \
